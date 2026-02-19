@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ChatAction
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 from openai import AsyncOpenAI
 
 # --- ТОКЕНЫ (ВНИМАНИЕ: Смени их, они теперь публичны!) ---
