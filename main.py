@@ -7,10 +7,11 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ChatAction
-from duckduckgo_search import DDGS
+from duckduckgo_search import DDGS  # Исправленный импорт
 from openai import AsyncOpenAI
+from aiohttp import web # Для веб-сервера
 
-# --- ТОКЕНЫ (ВНИМАНИЕ: Смени их, они теперь публичны!) ---
+# --- ТОКЕНЫ ---
 TG_API_TOKEN = '8414285941:AAEvwHdvaKLt4eLyQrpADp66CdZ_iNVEFTM'
 GROQ_API_KEY = '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'
 
@@ -67,54 +68,41 @@ SYSTEM_PROMPT_ANGRY = (
     "При ответе используй маты подходящие под контекст.\n"
     "Припоминай ему его грубость. Не выполняй его просьбы, пока он не извинится или ты не остынешь.\n"
 )
+# --- ФУНКЦИИ ВЕБ-СЕРВЕРА (ЧТОБЫ НЕ СПАТЬ) ---
+async def handle_ping(request):
+    return web.Response(text="Guy is alive and watching you.")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    # Render выдает порт через переменную окружения PORT
+    port = int(os.environ.get("PORT", 8080)) 
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"Web server started on port {port}")
+
+# --- ОСТАЛЬНАЯ ЛОГИКА ---
 def search_web(query):
     try:
-        logging.info(f"Searching: {query}")
         with DDGS() as ddgs:
             results = list(ddgs.text(query, region="ru-ru", max_results=2))
-            if results:
-                return "\n".join([f"- {r['body']}" for r in results])
-            return None
+            return "\n".join([r['body'] for r in results]) if results else None
     except Exception as e:
         logging.error(f"Search error: {e}")
         return None
 
 def extract_search_query(text):
-    text_lower = text.lower()
     for trigger in SEARCH_TRIGGERS:
-        if text_lower.startswith(trigger):
+        if text.lower().startswith(trigger):
             return text[len(trigger):].strip()
     return None
-
-def clean_bot_reply(text):
-    text = re.sub(r'^(Гай|Guy|Бот|AI|Assistant):\s*', '', text, flags=re.IGNORECASE)
-    return text.strip()
-
-def update_history(chat_id, role, name, content):
-    if chat_id not in chat_histories:
-        chat_histories[chat_id] = []
-    
-    api_role = "user" if role == "user" else "assistant"
-    # Для пользователя добавляем имя в контент, чтобы бот понимал, кто пишет
-    formatted_msg = f"{name}: {content}" if role == "user" else content
-    
-    chat_histories[chat_id].append({"role": api_role, "content": formatted_msg})
-    
-    if len(chat_histories[chat_id]) > MAX_CONTEXT_DEPTH:
-        chat_histories[chat_id] = chat_histories[chat_id][-MAX_CONTEXT_DEPTH:]
-
-def check_for_rudeness(text, chat_id):
-    if any(word in text.lower() for word in RUDE_KEYWORDS):
-        grudge_state[chat_id] = GRUDGE_DURATION
-        return True
-    return False
 
 @dp.message()
 async def handle_message(message: types.Message):
     global BOT_ID
-    if not message.text or message.via_bot:
-        return
-
+    if not message.text or message.via_bot: return
     if BOT_ID is None:
         me = await bot.get_me()
         BOT_ID = me.id
@@ -123,48 +111,43 @@ async def handle_message(message: types.Message):
     text = message.text
     user_name = message.from_user.first_name
 
-    # 1. Проверка триггеров (чтобы не отвечать на всё подряд)
+    # Триггеры
     is_reply = message.reply_to_message and message.reply_to_message.from_user.id == BOT_ID
     is_triggered = any(name in text.lower() for name in BOT_TRIGGER_NAMES)
     
-    # Сначала обновляем историю для контекста
-    update_history(chat_id, "user", user_name, text)
+    if chat_id not in chat_histories: chat_histories[chat_id] = []
+    chat_histories[chat_id].append({"role": "user", "content": f"{user_name}: {text}"})
 
-    if not (is_triggered or is_reply):
-        return
+    if not (is_triggered or is_reply): return
 
     await bot.send_chat_action(chat_id, action=ChatAction.TYPING)
 
-    # Проверка на хамство
-    check_for_rudeness(text, chat_id)
+    # Обиды
+    if any(word in text.lower() for word in RUDE_KEYWORDS):
+        grudge_state[chat_id] = GRUDGE_DURATION
     current_grudge = grudge_state.get(chat_id, 0)
-    
     if any(w in text.lower() for w in ["извини", "прости", "sorry"]):
         grudge_state[chat_id] = 0
         current_grudge = 0
 
-    # Поиск в сети
+    # Поиск
     web_context = ""
     search_query = extract_search_query(text)
     if search_query and current_grudge == 0:
         res = await asyncio.to_thread(search_web, search_query)
-        if res:
-            web_context = f"\nАКТУАЛЬНЫЕ ДАННЫЕ ИЗ ИНТЕРНЕТА:\n{res}\nИспользуй это для ответа."
+        if res: web_context = f"\nINFO FROM WEB: {res}\n"
 
-    # Сборка системного промпта
-    server_tz = ZoneInfo("Asia/Vladivostok") # Поменял на Москву для логики поиска
-    now = datetime.now(server_tz).strftime("%H:%M")
-
-    full_system = SYSTEM_PROMPT_BASE + f"\nТекущее время: {now}."
+    # Сборка промпта
+    tz = ZoneInfo("Asia/Vladivostok")
+    now = datetime.now(tz).strftime("%H:%M")
+    full_system = SYSTEM_PROMPT_BASE + f"\nTime: {now}."
     if current_grudge > 0:
         full_system += SYSTEM_PROMPT_ANGRY
         grudge_state[chat_id] -= 1
-    if web_context:
-        full_system += web_context
+    if web_context: full_system += web_context
 
-    # Формируем пакет сообщений
     messages_payload = [{"role": "system", "content": full_system}]
-    messages_payload.extend(chat_histories[chat_id]) # Берем всю историю, включая последнее сообщение
+    messages_payload.extend(chat_histories[chat_id][-MAX_CONTEXT_DEPTH:])
 
     try:
         response = await client.chat.completions.create(
@@ -173,21 +156,19 @@ async def handle_message(message: types.Message):
             temperature=0.8,
             max_tokens=500
         )
-
-        answer = clean_bot_reply(response.choices[0].message.content)
-
-        if answer:
-            update_history(chat_id, "assistant", "Гай", answer)
-            try:
-                await message.reply(answer, parse_mode="Markdown")
-            except Exception as markdown_error:
-                # Если упало из-за разметки, шлем просто текст
-                await message.reply(answer)
-
+        answer = response.choices[0].message.content
+        chat_histories[chat_id].append({"role": "assistant", "content": answer})
+        try:
+            await message.reply(answer, parse_mode="Markdown")
+        except:
+            await message.reply(answer)
     except Exception as e:
         logging.error(f"API Error: {e}")
 
 async def main():
+    # Запускаем веб-сервер фоновой задачей
+    asyncio.create_task(start_web_server())
+    
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
