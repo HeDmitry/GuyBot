@@ -1,0 +1,3 @@
+aiogram
+openai
+duckduckgo_search
